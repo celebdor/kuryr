@@ -7,7 +7,9 @@ Contents:
    :maxdepth 2
 
    installation
-   devstack
+   cloud-install
+   os-install
+   gce-install
    cloudinit
 
 

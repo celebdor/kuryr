@@ -3,71 +3,201 @@ Kuryr-Kubernetes Installation
 =============================
 
 This document describes how to install and test Kuryr-Kubernetes.
-It assumes you have a running installation of OpenStack's Neutron
-using `Midonet`_ as network providers. If not, see `DevStack Installation`_
-for a quick guide to install and configure `DevStack`_ the development
-version of OpenStack.
 
 In this guide, we will refer to three different environments, which
-can be physical or virtual: the OpenStack controller node (ost-controller),
-the Kubernetes cluster control1er (k8s-controller) and one or more Kubernetes
+can be physical or virtual: the OpenStack controler node (ost-controller),
+the Kubernetes cluster controller (k8s-controller) and one or more Kubernetes
 workers (k8s-worker1, k8s-worker2, ...).
 
-This guide assumes that you have `Docker`_ installed in the Kubernetes
-nodes (controller and workers).
+
+Please notice this guide will install a Kubernetes controller node.
+This is required even if you have a running cluster, due to the needed
+integration of Kuryr with Kuberlets.
 
 To facilitate the installation process, we provide the scripts to configure
 the k8s nodes (controller and workers) using `coreos-cloudinit`_ utility.
-Refer to the `CoreOS Cloud Init Installation`_ for  instructions on how to
+Refer to the `CoreOS Cloud Init Installation <cloudinit.html>`_ for  instructions on how to
 install it.
+
+These files can be used to configure nodes provisioned from cloud providers.
+The `Cloud Installation Guide <cloud-install.html>`_ explains how to adapt this
+installation guide when using in cloud. This is particularly interesting when
+launching multiple worker nodes.
+
+.. _requirements:
+
+Requirements
+------------
+
+The actual physical resources required by each node depend on the workload
+you plan to execute. Following are some recomendations:
+
+==============   ====       ======
+Node             CPUs       Memory
+==============   ====       ======
+ost-controller   4          16Gb
+k8s-controller   4          8Gb
+k8s-worker       8          8Gb
+==============   ====       ======
+
+This guide assumes that you have `Docker`_ installed in all nodes.
 
 Finally, this guide assumes all nodes have connectivity between them and
 access to the Internet for package installation.
 
+.. _ost-install:
 
 OpenStack controller
 --------------------
 
-At the ost-controller, the only step needed is to create one midonet
-tunnel zone to allow the communication between the K8s workers and the
-service load balancing agent, running in the ost-controller.
+The configuration file :download:`cloud-config-ost.yaml<./cloud-config-ost.yaml>` automates
+the deployment of an OpenStack Neutron controller node integrated with Midonet.
+It installs and configures the supporting services such as MariadDB, Cassandra,
+Zookeeper, and RabbitMQ.
 
-First, create the tunnel-zone:
+The installation process uses the configuration parameters defined in the
+*/etc/conf.d/ost-controller-defaults* file which is part of the cloud config file:
+
+.. code-block:: yaml
+
+    write-files:
+    ...
+      - path: /etc/conf.d/ost-controller-defaults
+        permissions: '0644'
+        content: |
+          DB_HOST=127.0.0.1
+          DB_USERNAME=root
+          DB_PASSWORD=root
+          OS_DEBUG=True
+          OS_VERBOSE=Fals4
+          DB_NAME=openstack
+          OS_TOKEN=admin
+          OS_AUTH_URL=http://127.0.0.1:35357/v2.0
+          OS_AUTH_URI=http://127.0.0.1:5000/v2.0
+          OS_NEUTRON_URL=http://127.0.0.1:9696
+          OS_USERNAME=neutron
+          OS_PASSWORD=neutron
+          OS_RPC_BACKEND=rabbit
+          RB_HOST=127.0.0.1
+          RB_USERNAME=guest
+          RB_PASSWORD=guest
+          OS_TENANT_NAME=service
+          OS_REGION_NAME=RegionOne
+          MN_CLUSTER_URL=http://127.0.0.1:8181/midonet-api
+          MN_TUNNEL_ZONE=demo
+          MN_USERNAME=admin
+          MN_PASSWORD=admin
+          MN_PROJECT=admin
+          ZK_QUORUM="127.0.0.1:1"
+          ZK_CLUSTER="127.0.0.1:2181"
+          ZK_ID=1
+          C_SERVERS="127.0.0.1"
+          C_FACTOR=1
+
+In general, the values provided in the file can be left untouched, but they can be easily  overriden
+if you create an initial */etc/conf.d/ost-controller* file. The installation process merges both
+files, giving precedense to the values provided by you.
+
+For example, the local IP can be provided as follows:
 
 .. code-block:: bash
 
-    $ midonet-cli -e tunnel-zone create name demo type vxlan
-      282d7315-382c-4736-a567-afa57009d942
+   $ mkdir /etc/conf.d
+   $ cat >> /etc/conf.d/ost-controller <<EOF
+     LOCAL_IP=10.142.0.2
+     EOF
 
-The name used is important because the k8s-workers will add themselves to it
-based on this name.
-
-With the uuid for the tunnel zone that was returned, we should proceed to
-add the ost-controller host to the tunnel zone. This will allow the haproxy
-loadbalancer agent to communicate with the pods in the worker instances.
-
-Check your host uuid:
+To proceed deploying and configuring the components run the coreos-cloudinit command:
 
 .. code-block:: bash
 
-    $ midonet-cli -e host list
-    host bd6a3fe1-a655-49af-bd77-d3b2a5356af4 name ost-controller alive true addresses fe80:0:0:0:0:11ff:fe00:1101,169.254.123.1,fe80:0:0:0:4001:aff:fe8e:2,10.142.0.2,172.17.0.1,fe80:0:0:0:fc6c:38ff:fe47:f864,127.0.0.1,0:0:0:0:0:0:0:1,fe80:0:0:0:0:11ff:fe00:1102,fe80:0:0:0:c4fd:6dff:fe99:7a6d,172.19.0.2 flooding-proxy-weight 1 container-weight 1 container-limit no-limit enforce-container-limit false
+    $ coreos-cloudinit --from-file cloud-config-ost.yaml
+    2016/08/22 23:22:52 Checking availability of "local-file"
+    2016/08/22 23:22:52 Fetching user-data from datasource of type "local-file"
+    2016/08/22 23:22:52 Fetching meta-data from datasource of type "local-file"
+    2016/08/22 23:22:52 Parsing user-data as cloud-config
+    2016/08/22 23:22:52 Merging cloud-config from meta-data and user-data
+    2016/08/22 23:22:52 Writing file to "/etc/conf.d/ost-controller-defaults"
+    2016/08/22 23:22:52 Wrote file to "/etc/conf.d/ost-controller-defaults"
+    2016/08/22 23:22:52 Wrote file /etc/conf.d/ost-controller-defaults to filesystem
+    2016/08/22 23:22:52 Writing file to "/opt/bin/neutron"
+    2016/08/22 23:22:52 Wrote file to "/opt/bin/neutron"
+    2016/08/22 23:22:52 Wrote file /opt/bin/neutron to filesystem
+    2016/08/22 23:22:52 Writing file to "/opt/bin/prepare-config"
+    .
+    .
+    .
+    2016/08/22 23:22:53 Result of "start" on "keystone.service": done
+    2016/08/22 23:22:53 Calling unit command "start" on "neutron.service"'
+    2016/08/22 23:22:53 Result of "start" on "neutron.service": done
+    2016/08/22 23:22:53 Calling unit command "start" on "neutron-lbaas.service"'
+    2016/08/22 23:22:57 Result of "start" on "neutron-lbaas.service": done
+    2016/08/22 23:22:57 Calling unit command "start" on "midonet-agent.service"'
+    2016/08/22 23:22:57 Result of "start" on "midonet-agent.service": done
+    2016/08/22 23:22:57 Calling unit command "start" on "midonet-cluster.service"'
+    2016/08/22 23:23:14 Result of "start" on "midonet-cluster.service": done
 
-Then add it to the tunnel zone, using the internal IP:
+.. _ost-post-install:
+
+Post-installation configuration
++++++++++++++++++++++++++++++++
+
+After the installation process fineshes, it is necessary to create the users and
+service endpoints in Keystone, using the script created by the installation process:
 
 .. code-block:: bash
 
-    $ midonet-cli -e tunnel-zone 282d7315-382c-4736-a567-afa57009d942 add \
-      member host bd6a3fe1-a655-49af-bd77-d3b2a5356af4 address 10.142.0.2
-    zone 282d7315-382c-4736-a567-afa57009d942 host bd6a3fe1-a655-49af-bd77-d3b2a5356af4 address 10.142.0.2
+    $ /opt/bin/keystone-provisioning.sh
+    +-------------+----------------------------------+
+    | Field       | Value                            |
+    +-------------+----------------------------------+
+    | description | None                             |
+    | enabled     | True                             |
+    | id          | 822505779e514e6d8746b4f33e26e4a5 |
+    | name        | admin                            |
+    +-------------+----------------------------------+
+    +-------+----------------------------------+
+    | Field | Value                            |
+    +-------+----------------------------------+
+    | id    | 6ae2e49a00c342fdaeb17d13daf767d2 |
+    | name  | admin                            |
+    +-------+----------------------------------+
+    | name        | service                          |
+    +-------------+----------------------------------+
+    | name        | keystone                         |
+    | type        | identity                         |
+    +-------------+----------------------------------+
+    .
+    .
+    .
+    +--------------+----------------------------------+
+    | adminurl     | http://127.0.0.1:9696            |
+    | id           | 4d45f85304dc4f298401ff23c7320924 |
+    | internalurl  | http://127.0.0.1:9696            |
+    | publicurl    | http://127.0.0.1:9696            |
+    | region       | RegionOne                        |
+    | service_id   | 0d255909e555431b8ef2f770df62e247 |
+    | service_name | neutron                          |
+    | service_type | network                          |
+    +--------------+----------------------------------+
 
+Finally, we need to create one Midonet tunnel zone to allow the communication between the K8s
+workers and the service load balancing agent, running in the ost-controller.
+
+.. code-block:: bash
+
+   $ /opt/bin/setup-midonet.sh
+   zone 33102da5-a7a7-43b7-b904-a46faecb0f1b host 5a1bb683-704f-4ce9-8c38-45a8ec174b41 address 192.168.1.124
+
+
+.. _K8s-install:
 
 Kubernetes controller
 ---------------------
 
 The configuration file :download:`cloud-config-k8s-controller.yaml<./cloud-config-k8s-controller.yaml>` automates the deployment
 of all the components required by the kubernetes controller. In this process, the Kuryr contanier
-is downloaded and installed as a *systemctl* service::
+is downloaded and installed as a *systemctl* service using the `Docker image from Midonet project<https://hub.docker.com/r/midonet/raven/>`::
 
     [Unit]
     Description=Kuryr Kubernetes API watcher and translator of events to \
@@ -77,7 +207,7 @@ is downloaded and installed as a *systemctl* service::
     After=kube-apiserver.service docker.service
 
     [Service]
-    EnvironmentFile=/etc/conf.d/k8s-master
+    EnvironmentFile=/etc/conf.d/k8s-controller
     ExecStartPre=/opt/bin/wupiao ${K8S_CONTROLLER}:8080
     ExecStartPre=-/usr/bin/docker kill %n
     ExecStartPre=-/usr/bin/docker rm %n
@@ -98,25 +228,61 @@ is downloaded and installed as a *systemctl* service::
 
 The installation process uses the */etc/conf.d/k8s-controller* file to hold configuration
 information. Create it and add the information about the IP for the ost-controller node and the
-k8s-controller node itself, as well as the credentials to access Openstack services:
+k8s-controller node itself:
 
 .. code-block:: bash
 
    $ mkdir /etc/conf.d
    $ cat >> /etc/conf.d/k8s-controller <<EOF
+     LOCAL_IP=10.142.0.3
      OST_CONTROLLER_IP=10.142.0.2
-     K8S_CONTROLLER_IP=10.142.0.3
-     OS_USERNAME=admin
-     OS_PASSWORD=admin
-     OS_TENANT_NAME=admin
      EOF
+
+You can also modify any of the default parameters defined in the */etc/conf.d/k8s-controller-defaults*
+file in the *write-file* section of the cloud-config file
+
+.. code-block:: yaml
+
+    write-files:
+      -path: /etc/conf.d/k8s-controller-defaults
+       #Default configuration parameters
+       content: |
+         OS_USERNAME=neutron
+         OS_PASSWORD=neutron
+         OS_TENANT_NAME=service
 
 Now, proceed to deploy and configure the components:
 
 .. code-block:: bash
 
     $ coreos-cloudinit --from-file cloud-config-k8s-controller.yaml
+    2016/08/03 09:18:39 Checking availability of "local-file"
+    2016/08/03 09:18:39 Fetching user-data from datasource of type "local-file"
+    2016/08/03 09:18:39 Fetching meta-data from datasource of type "local-file"
+    2016/08/03 09:18:39 Parsing user-data as cloud-config
+    .
+    .
+    .
+    2016/08/03 09:19:01 Result of "start" on "demo-prepare-cli-tools.service": done
+    2016/08/03 09:19:01 Calling unit command "start" on "etcd3.service"'
+    2016/08/03 09:19:04 Result of "start" on "etcd3.service": done
+    2016/08/03 09:19:04 Calling unit command "start" on "fleet.service"'
+    2016/08/03 09:19:04 Result of "start" on "fleet.service": done
+    2016/08/03 09:19:04 Calling unit command "start" on "docker.service"'
+    2016/08/03 09:19:04 Result of "start" on "docker.service": done
+    2016/08/03 09:19:04 Calling unit command "start" on "kubernetes-setup-files.service"'
+    2016/08/03 09:19:29 Result of "start" on "kubernetes-setup-files.service": done
+    2016/08/03 09:19:29 Calling unit command "start" on "kube-apiserver.service"'
+    2016/08/03 09:19:29 Result of "start" on "kube-apiserver.service": done
+    2016/08/03 09:19:29 Calling unit command "start" on "kube-controller-manager.service"'
+    2016/08/03 09:19:42 Result of "start" on "kube-controller-manager.service": done
+    2016/08/03 09:19:42 Calling unit command "start" on "kube-scheduler.service"'
+    2016/08/03 09:19:42 Result of "start" on "kube-scheduler.service": done
+    2016/08/03 09:19:42 Calling unit command "start" on "kuryr-watcher.service"'
+    2016/08/03 09:19:42 Result of "start" on "kuryr-watcher.service": done
 
+
+.. _worker-install:
 
 Kubernetes Workers
 ------------------
@@ -124,8 +290,7 @@ Kubernetes Workers
 Similarly to the k8s-controller, the K8s workers can be configured with a
 cloud-config file :download:`cloud-config-k8s-worker.yaml<cloud-config-k8s-worker.yaml>`. The same file can be used for multiple workers.
 
-The installation process intalls the Midonet's flavor of Kubelet, the Kubernetes worker service, which has
-the required integration with Kuryr::
+The installation process intalls the `Midonet's flavor of Kubelet<https://hub.docker.com/r/midonet/kubelet/>`, the Kubernetes worker service, which has the required integration with Kuryr::
 
     [Unit]
     Description=Kubernetes kubelet with kuryr CNI driver and MidoNet \
@@ -135,11 +300,7 @@ the required integration with Kuryr::
     After=docker.service prepare-config.service
 
     [Service]
-    EnvironmentFile=/etc/conf.d/k8s-worker
-    ExecStartPre=/usr/bin/docker pull midonet/kubelet
-    ExecStartPre=/opt/bin/wupiao ${K8S_CONTROLLER}:8080
-    ExecStartPre=-/usr/bin/docker kill %n
-    ExecStartPre=-/usr/bin/docker rm %n
+    ...
     ExecStart=/usr/bin/docker run --name %n \
           -e MASTER_IP=${K8S_CONTROLLER} \
           -e ZK_ENDPOINTS=${OST_CONTROLLER}:2181 \
@@ -154,16 +315,11 @@ the required integration with Kuryr::
           --privileged=true \
           --pid=host \
           midonet/kubelet
-    ExecStop=/usr/bin/docker kill %n
-    ExecStopPost=/usr/bin/docker rm -f %n
-    Restart=always
-    RestartSec=3
-    After=midonet-agent.service
 
 The installation script expects some configuration information in the
 */etc/conf.d/k8s-worker* file. The IP addresses of the openstack and k8s controllers
-are needed. Also, to automate the setup, the name of the tunnel zone defined
-in the OpenStack controller, as well as the local ip for the worker.
+are needed. Also, the ip address to be used for joining the  tunnel zone defined
+in the ost-controller:
 
 Create it and complete the required information:
 
@@ -174,7 +330,6 @@ Create it and complete the required information:
     OST_CONTROLLER_IP=10.142.0.2
     K8S_CONTROLLER_IP=10.142.0.3
     LOCAL_IP=10.142.0.4
-    TUNNEL_ZONE=demo
     EOF
 
 Now, proceed to deploy and configure the components:
@@ -182,6 +337,24 @@ Now, proceed to deploy and configure the components:
 .. code-block:: bash
 
     $ coreos-cloudinit --from-file cloud-config-k8s-worker.yaml
+      2016/08/03 10:49:24 Checking availability of "local-file"
+      2016/08/03 10:49:24 Fetching user-data from datasource of type "local-file"
+      2016/08/03 10:49:24 Fetching meta-data from datasource of type "local-file"
+      2016/08/03 10:49:24 Parsing user-data as cloud-config
+      .
+      .
+      .
+      2016/08/03 10:49:24 Calling unit command "start" on "prepare-config.service"'
+      2016/08/03 10:49:25 Result of "start" on "prepare-config.service": done
+      2016/08/03 10:49:25 Calling unit command "start" on "midonet-agent.service"'
+      2016/08/03 10:51:46 Result of "start" on "midonet-agent.service": done
+      2016/08/03 10:51:46 Calling unit command "start" on "kubelet.service"'
+      2016/08/03 10:53:12 Result of "start" on "kubelet.service": done
+
+.. _k8s-worker-setup:
+
+Setup
++++++
 
 Once the installation process ends, run the midonet setup script to join the tunnel zone
 and allow communication between workers and the open stack controller node:
@@ -193,8 +366,62 @@ and allow communication between workers and the open stack controller node:
 The previous steps can be repeated for each worker. The rest of this document assumes you
 have at least two workers.
 
+
+
+.. _post-installation:
+
+Post-Installation
+-----------------
+
+Once the instances are installed, some post-installation setup is required.
+
+Service Load balancing Configuration
+++++++++++++++++++++++++++++++++++++
+
+.. note:: If this were an standard step, the installation procedure should generate an script for this step.
+
+If you plan to expose Kubernetes Services outside the Kubernetes cluster, it is necesary to configure your network so that the service load balancer that runs on the OST Controller has access to the service network.
+
+Kuryr `automatically creates an external network for services<../../en/ops-guide/getting_started.html#neutron-topology>`_ `raven-default-external-net` and
+a subnet for the default namespace `raven-default-external-subnet`. By deafult
+this subnet is assigned the range 172.16.0.0/16 for external addresses (FIPs).
+
+First,create an interface to link the ost-controller's network with Raven's default services subnet:
+
+.. code-block:: bash
+
+    $ neutron router-interface-add $(neutron router-list  | awk '$4=="mn-edge" {print $2}') $(neutron subnet-list | awk '$4=="raven-default-external-subnet" {print $2}')
+    Added interface 56d9ab50-e527-4fcb-884b-a51ae02dddb4 to router af96d950-97aa-473f-87a3-328830a5f774
+
+Secondly, create the appropiated routes:
+
+.. code-block:: bash
+
+    $ ip -4 route add 172.16.0.0/16 via 172.19.0.1 dev mn-uplink-host
+    $ iptables -t nat -A POSTROUTING -s 172.16.0.0/16 -j MASQUERADE
+
+It should be possible to reach the gateway of the default service network:
+
+.. code-block:: bash
+
+    $ ping -c 3 172.16.0.1
+    PING 172.16.0.1 (172.16.0.1) 56(84) bytes of data.
+    64 bytes from 172.16.0.1: icmp_seq=1 ttl=64 time=4.56 ms
+    64 bytes from 172.16.0.1: icmp_seq=2 ttl=64 time=3.61 ms
+    64 bytes from 172.16.0.1: icmp_seq=3 ttl=64 time=3.49 ms
+
+    --- 172.16.0.1 ping statistics ---
+    3 packets transmitted, 3 received, 0% packet loss, time 2002ms
+    rtt min/avg/max/mdev = 3.498/3.892/4.566/0.481 ms
+
+
+.. _post-installiation-verification:
+
+Post-installation verification
+------------------------------
+
 Checking Health
----------------
++++++++++++++++
 
 From the k8s-controller node check that the nodes are up:
 
@@ -230,7 +457,7 @@ failed tasks are there to clean up things and will fail if there is nothing to
 clean up.
 
 Running your first containers
------------------------------
++++++++++++++++++++++++++++++
 
 With all the cluster healthy, let's run our first containers:
 
@@ -268,47 +495,12 @@ Having seen the ips, let's verify connectivity:
     $ kubectl exec my-nginx-1830394127-uyh8d ping 192.168.0.14
 
 
-Exposing a service
-------------------
+Exposing your services to the external world
+++++++++++++++++++++++++++++++++++++++++++++
 
-Now that se have the pods deployed, we will expose them as a service and show how they can
+Now that we have deployed the pods, we will expose them as a service and show how they can
 be accessed from an external network. In order to do so, we will use the same ost-controller
 node as external node, as it is not part of the cluster of workers.
-
-Kuryr creates automatically an external network for services `raven-default-external-net` and
-a subnet for the default namespace `raven-default-external-subnet`. For the purpose of this demo,
-it is necessary that this subnet be accessible from the ost-controller host.
-
-First,create an interface to link the ost-controller's network with Raven's default services subnet:
-
-.. code-block:: bash
-
-    $ neutron router-interface-add $(neutron router-list  | awk '$4=="mn-edge" {print $2}') $(neutron subnet-list | awk '$4=="raven-default-external-subnet" {print $2}')
-    Added interface 56d9ab50-e527-4fcb-884b-a51ae02dddb4 to router af96d950-97aa-473f-87a3-328830a5f774
-
-Secondly, create the appropiated routes:
-
-.. code-block:: bash
-
-    $ ip -4 route add 172.16.0.0/16 via 172.19.0.1 dev mn-uplink-host
-    $ iptables -t nat -A POSTROUTING -s 172.16.0.0/16 -j MASQUERADE
-
-It should be possible to reach the gateway of the default service network:
-
-.. code-block:: bash
-
-    $ ping -c 3 172.16.0.1
-    PING 172.16.0.1 (172.16.0.1) 56(84) bytes of data.
-    64 bytes from 172.16.0.1: icmp_seq=1 ttl=64 time=4.56 ms
-    64 bytes from 172.16.0.1: icmp_seq=2 ttl=64 time=3.61 ms
-    64 bytes from 172.16.0.1: icmp_seq=3 ttl=64 time=3.49 ms
-
-    --- 172.16.0.1 ping statistics ---
-    3 packets transmitted, 3 received, 0% packet loss, time 2002ms
-    rtt min/avg/max/mdev = 3.498/3.892/4.566/0.481 ms
-
-Exposing your services to the external world
---------------------------------------------
 
 From the k8s-controller instance, create a service to expose the pods with and ip
 address obtained from external network:
@@ -324,7 +516,7 @@ address obtained from external network:
     my-nginx     10.0.0.137   172.16.0.12   80/TCP    11s
 
 
-You can check this association has also be made in neutron:
+You can check this association has also been made in neutron:
 
 .. code-block:: bash
 
@@ -335,17 +527,6 @@ You can check this association has also be made in neutron:
     | 10.0.0.137       | 172.16.0.12         |
     +------------------+---------------------+
 
-The service should now be accessible from the ost-controller instance:
-
-.. code-block:: bash
-
-   $ wget 172.16.0.12 -nv --method=HEAD
-     2016-07-27 13:42:36 URL: http://172.16.0.12/ 200 OK
-
-
-.. _`DevStack Installation`: ./devstack.html
-.. _`DevStack`: http://docs.openstack.org/developer/devstack/
 .. _`Midonet`: https://www.midonet.org/
 .. _`coreos-cloudinit`: https://coreos.com/os/docs/latest/cloud-config.html
 .. _`Docker`: https://docs.docker.com/engine/installation/linux/
-.. _`CoreOS Cloud Init Installation`: ./cloudinit.html
