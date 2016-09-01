@@ -186,7 +186,7 @@ workers and the service load balancing agent, running in the ost-controller.
 
 .. code-block:: bash
 
-   $ /opt/bin/setup-midonet.sh
+   $ sudo /opt/bin/midonet-setup
    zone 33102da5-a7a7-43b7-b904-a46faecb0f1b host 5a1bb683-704f-4ce9-8c38-45a8ec174b41 address 192.168.1.124
 
 
@@ -327,8 +327,8 @@ Create it and complete the required information:
 
    $ mkdir /etc/conf.d
    $ cat >> /etc/conf.d/k8s-worker <<EOF
-    OST_CONTROLLER_IP=10.142.0.2
-    K8S_CONTROLLER_IP=10.142.0.3
+    OST_CONTROLLER=10.142.0.2
+    K8S_CONTROLLER=10.142.0.3
     LOCAL_IP=10.142.0.4
     EOF
 
@@ -367,7 +367,6 @@ The previous steps can be repeated for each worker. The rest of this document as
 have at least two workers.
 
 
-
 .. _post-installation:
 
 Post-Installation
@@ -375,30 +374,47 @@ Post-Installation
 
 Once the instances are installed, some post-installation setup is required.
 
-Service Load balancing Configuration
-++++++++++++++++++++++++++++++++++++
 
-.. note:: If this were an standard step, the installation procedure should generate an script for this step.
+Connecting ost-controller to Raven External Network
++++++++++++++++++++++++++++++++++++++++++++++++++++
 
-If you plan to expose Kubernetes Services outside the Kubernetes cluster, it is necesary to configure your network so that the service load balancer that runs on the OST Controller has access to the service network.
+We will use the ost-controller as external host to test the access to services.
+It is necesary to configure your network so that the ost-controller has access
+to the service network.
 
 Kuryr `automatically creates an external network for services<../../en/ops-guide/getting_started.html#neutron-topology>`_ `raven-default-external-net` and
 a subnet for the default namespace `raven-default-external-subnet`. By deafult
 this subnet is assigned the range 172.16.0.0/16 for external addresses (FIPs).
 
-First,create an interface to link the ost-controller's network with Raven's default services subnet:
+The fitst step is to create an uplink at the ost-controller, using the script provided in
+the installation. See `Edge Router Setup at the Midonet Quick Start Guide <https://docs.midonet.org/docs/latest-en/quick-start-guide/ubuntu-1404_liberty/content/edge_router_setup.html>`_ for more details.
+
+.. code-block:: bash
+    $ sudo /opt/bin/create_uplink
+    Created a new router:
+    +-----------------------+--------------------------------------+
+    | Field                 | Value                                |
+    +-----------------------+--------------------------------------+
+    | admin_state_up        | True                                 |
+    | external_gateway_info |                                      |
+    | id                    | a8b55de2-5b6c-4de1-bae2-a8a954146434 |
+    | name                  | mn-edge                              |
+    | routes                |                                      |
+    | status                | ACTIVE                               |
+    | tenant_id             | 75067bca32054921a657e53a1cffdbec     |
+    +-----------------------+--------------------------------------+
+    .
+    .
+    .
+    Added interface 2d087d3f-fdd0-4228-a048-b1c6ede1649a to router mn-edge.
+    Updated router: mn-edge
+
+Then, create an interface to link the ost-controller host with Raven's default services subnet:
 
 .. code-block:: bash
 
-    $ neutron router-interface-add $(neutron router-list  | awk '$4=="mn-edge" {print $2}') $(neutron subnet-list | awk '$4=="raven-default-external-subnet" {print $2}')
+    $ sudo /opt/bin/link_raven_network
     Added interface 56d9ab50-e527-4fcb-884b-a51ae02dddb4 to router af96d950-97aa-473f-87a3-328830a5f774
-
-Secondly, create the appropiated routes:
-
-.. code-block:: bash
-
-    $ ip -4 route add 172.16.0.0/16 via 172.19.0.1 dev mn-uplink-host
-    $ iptables -t nat -A POSTROUTING -s 172.16.0.0/16 -j MASQUERADE
 
 It should be possible to reach the gateway of the default service network:
 
@@ -410,10 +426,9 @@ It should be possible to reach the gateway of the default service network:
     64 bytes from 172.16.0.1: icmp_seq=2 ttl=64 time=3.61 ms
     64 bytes from 172.16.0.1: icmp_seq=3 ttl=64 time=3.49 ms
 
-    --- 172.16.0.1 ping statistics ---
-    3 packets transmitted, 3 received, 0% packet loss, time 2002ms
-    rtt min/avg/max/mdev = 3.498/3.892/4.566/0.481 ms
-
+   --- 172.16.0.1 ping statistics ---
+   3 packets transmitted, 3 received, 0% packet loss, time 2002ms
+   rtt min/avg/max/mdev = 3.498/3.892/4.566/0.481 ms
 
 .. _post-installiation-verification:
 
@@ -526,6 +541,13 @@ You can check this association has also been made in neutron:
     +------------------+---------------------+
     | 10.0.0.137       | 172.16.0.12         |
     +------------------+---------------------+
+
+if you follwed the post intallation procedure and created a link to Raven's external network,
+the service should now be accessible from the ost-controller instance::
+
+   $ wget 172.16.0.12 -nv --method=HEAD
+        2016-07-27 13:42:36 URL: http://172.16.0.12/ 200 OK
+
 
 .. _`Midonet`: https://www.midonet.org/
 .. _`coreos-cloudinit`: https://coreos.com/os/docs/latest/cloud-config.html
