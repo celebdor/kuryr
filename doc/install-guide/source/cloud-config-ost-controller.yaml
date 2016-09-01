@@ -382,11 +382,13 @@ coreos:
         ExecStartPre=/usr/bin/docker pull midonet/neutron-lbaas:liberty
 
         ExecStart=/usr/bin/docker run --name %n   \
-                 --net=host -v /var/log/%n:/var/log \
+                 --net=host --privileged \
+                 -v /var/log/%n:/var/log \
+                 -v /var/run/midolman:/var/run/midolman \
                  -e RB_HOST=${RB_HOST}            \
                  -e RB_USERNAME=${RB_USERNAME}    \
                  -e RB_PASSWORD=${RB_PASSWORD}    \
-                 -e UUID=$UUID                    \
+                 -e UUID=${UUID}                    \
                  midonet/neutron-lbaas:liberty
         ExecStop=/usr/bin/docker kill %n
         ExecStopSost=/usr/bin/docker rm -f %n
