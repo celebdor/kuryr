@@ -50,7 +50,7 @@ access to the Internet for package installation.
 OpenStack controller
 --------------------
 
-The configuration file :download:`cloud-config-ost.yaml<./cloud-config-ost.yaml>` automates
+The configuration file :download:`cloud-config-ost-controller.yaml<./cloud-config-ost-controller.yaml>` automates
 the deployment of an OpenStack Neutron controller node integrated with Midonet.
 It installs and configures the supporting services such as MariadDB, Cassandra,
 Zookeeper, and RabbitMQ.
@@ -197,8 +197,7 @@ Kubernetes controller
 
 The configuration file :download:`cloud-config-k8s-controller.yaml<./cloud-config-k8s-controller.yaml>` automates the deployment
 of all the components required by the kubernetes controller. In this process, the Kuryr contanier
-is downloaded and installed as a *systemctl* service using the `Docker image from Midonet project<https://hub.docker.com/r/midonet/raven/>`::
-
+is downloaded and installed as a *systemctl* service using the `Docker image from Midonet project <https://hub.docker.com/r/midonet/raven/>`_::
     [Unit]
     Description=Kuryr Kubernetes API watcher and translator of events to \
       Neutron entities.
@@ -382,7 +381,7 @@ We will use the ost-controller as external host to test the access to services.
 It is necesary to configure your network so that the ost-controller has access
 to the service network.
 
-Kuryr `automatically creates an external network for services<../../en/ops-guide/getting_started.html#neutron-topology>`_ `raven-default-external-net` and
+Kuryr `automatically creates an external network for services <https://docs.midonet.org/docs/kuryr/tech-preview-release/en/ops-guide/getting_started.html>`_ *raven-default-external-net* and
 a subnet for the default namespace `raven-default-external-subnet`. By deafult
 this subnet is assigned the range 172.16.0.0/16 for external addresses (FIPs).
 
@@ -390,6 +389,7 @@ The fitst step is to create an uplink at the ost-controller, using the script pr
 the installation. See `Edge Router Setup at the Midonet Quick Start Guide <https://docs.midonet.org/docs/latest-en/quick-start-guide/ubuntu-1404_liberty/content/edge_router_setup.html>`_ for more details.
 
 .. code-block:: bash
+
     $ sudo /opt/bin/create_uplink
     Created a new router:
     +-----------------------+--------------------------------------+
