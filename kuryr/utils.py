@@ -186,6 +186,16 @@ def utf8_json_encoder(deserialized):
     return bytearray(jsonutils.dumps(deserialized), 'utf-8')
 
 
+def get_network_name(namespace):
+    """Gets the network name corresponding to the provided namespace.
+
+    :param namespace: The namespace name for which we want to obtain the
+                      network name.
+    :returns: The network name corresponding to the given namespace name.
+    """
+    return namespace
+
+
 def get_subnet_name(namespace):
     """Gets the subnet name corresponding to the provided namespace.
 
@@ -194,6 +204,45 @@ def get_subnet_name(namespace):
     :returns: The subnet name corresponding to the given namespace name.
     """
     return '-'.join([namespace, 'subnet'])
+
+
+def get_ns_sg_name(namespace):
+    """Gets the security group  name corresponding to the provided namespace.
+
+    :param namespace: The namespace name for which we want to obtain the
+                      security group name.
+    :returns: The security group name corresponding to the given namespace
+              name.
+    """
+    return '-'.join([namespace, 'sg'])
+
+
+def get_vip_sg_name(service, namespace):
+    """Gets the security group name
+
+    The one corresponding to the provided service in a namespace.
+
+    :param namespace: The namespace name for which we want to obtain
+                      the security group name.
+    :para service: the service the sg is related to
+    :returns: The security group name corresponding to the
+              given namespace name.
+    """
+    return '-'.join([namespace, service, 'vip-sg'])
+
+
+def get_fip_sg_name(service, namespace):
+    """Gets the security group name for the fip
+
+    It corresponds to the provided service in a namespace.
+
+    :param namespace: The namespace name for which we want to obtain
+                      the security group name.
+    :para service: the service the sg is related to
+    :returns: The security group name corresponding to the given
+              namespace name.
+    """
+    return '-'.join([namespace, service, 'fip-sg'])
 
 
 def get_service_endpoint(namespace, service_name):
