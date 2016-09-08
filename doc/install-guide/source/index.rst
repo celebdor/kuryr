@@ -10,7 +10,6 @@ Contents:
    cloud-install
    os-install
    gce-install
-   cloudinit
 
 
 
