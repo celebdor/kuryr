@@ -46,7 +46,6 @@ Now register the keys in OS::
   $ nova keypair-add --pub-key ~/.ssh/id_rsa.pub demo-key
 
 
-
 Creating a network
 ------------------
 Let's create a network for the instances that we'll use as the underlay for
@@ -112,6 +111,51 @@ match those requirements:
      +----+-----------+-----------+------+-----------+------+-------+-------------+-----------+
 
 
+Preparing for accessing instances
+---------------------------------
+
+To complete the installation procedure, you will need to access the instances you create. in order to do so,
+you will have to assign a floating ip from a public network. Ask your OpenStack administrator for this network
+and be sure you have the rights to assign floating-ips from it.
+
+You must follow the following steps for each instance, once you create it:
+
+First, create a floating ip:
+
+.. code-block:: bash
+
+     $ neutron floatingip-create <external network>
+     Created a new floatingip:
+     +---------------------+--------------------------------------+
+     | Field               | Value                                |
+     +---------------------+--------------------------------------+
+     | fixed_ip_address    |                                      |
+     | floating_ip_address | <floating ip address>                |
+     | floating_network_id | c0ccd5d3-f5fa-4608-9310-49919038faa4 |
+     | id                  | e5d39a05-ecd4-41bc-a104-93b798dfc644 |
+     | port_id             |                                      |
+     | router_id           |                                      |
+     | status              | ACTIVE                               |
+     | tenant_id           | bbefc5080f814a46bd1b1103ea83750a     |
+     +---------------------+--------------------------------------+
+
+Take note of the ip address, as you will need it later to connect to the instance.
+
+Now we can associate the floating ip address with the instance:
+
+.. code-block:: bash
+
+   $ nova floating-ip-associate <instance> <floating ip address>
+
+Finally, to access the instance, use its floating ip and the key-pair you generated.
+Notice that for CoreOS instances, the root username is "core".
+
+.. code-block:: bash
+
+    $ ssh core@<flating ip>
+    CoreOS stable (1122.2.0)
+    Last login: Wed Jul 7 13:14:16 2016 from 62.37.161.182
+
 Creating OST Controller instance
 --------------------------------
 
@@ -123,10 +167,33 @@ Let's provision an instance for the OST Controller
 
     $ nova boot --flavor m2.xlarge --image "CoreOS 1068.6.0"  \
            --nic net-name=demo,v4-fixed-ip=10.142.0.2 \
-           --security-group demo --key-name demo-key ost-controller
+           --security-group demo --key-name demo-key ost-controller \
+           --user-data cloud-config-ost-controller.yaml
+
+    +--------------------------------------+-----------------------------------------------+
+    | Property                             | Value                                         |
+    +--------------------------------------+-----------------------------------------------+
+    ...
+    | created                              | 2016-07-13T13:46:48Z                          |
+    | flavor                               | m2.xlarge (12)                                |
+    | hostId                               |                                               |
+    | id                                   | 6e308df3-1312-4286-98e9-b5166ed2d19a          |
+    | image                                | CoreOS (10a70cf6-28ac-440c-9e76-8b8fdc21c08e) |
+    | key_name                             | demo-key                                      |
+    | metadata                             | {}                                            |
+    | name                                 | ost-controller                                |
+    | os-extended-volumes:volumes_attached | []                                            |
+    | progress                             | 0                                             |
+    | security_groups                      | demo                                          |
+    | status                               | BUILD                                         |
+    | tenant_id                            | bbefc5080f814a46bd1b1103ea83750a              |
+    | updated                              | 2016-07-13T13:46:40Z                          |
+    | user_id                              | 337002c9ef774525a03dfd8da88662df              |
+    +--------------------------------------+-----------------------------------------------+
 
 
-Follow the same post-installation steps defined in the installation guide.
+Login into the ost-controller instance and follow the same post-installation steps defined in
+the installation guide.
 
 
 Kubernetes controller
@@ -148,7 +215,6 @@ Then create the controller instance:
     | Property                             | Value                                         |
     +--------------------------------------+-----------------------------------------------+
     ...
-    | adminPass                            | cNcB2VxCwUDk                                  |
     | created                              | 2016-07-13T13:56:48Z                          |
     | flavor                               | m2.large (12)                                 |
     | hostId                               |                                               |
@@ -165,6 +231,9 @@ Then create the controller instance:
     | updated                              | 2016-07-13T13:56:49Z                          |
     | user_id                              | 337002c9ef774525a03dfd8da88662df              |
     +--------------------------------------+-----------------------------------------------+
+
+Login into the k8s-controller instance and follow the same post-installation steps defined in
+the installation guide.
 
 
 Worker nodes
@@ -203,6 +272,11 @@ Using this cloud-config file you can create as many worker instances as you deci
     | updated                              | 2016-07-13T14:16:50Z                          |
     | user_id                              | 337002c9ef774525a03dfd8da88662df              |
     +--------------------------------------+-----------------------------------------------+
+
+Login into the k8s-worker instance and follow the same post-installation steps defined in
+the installation guide.
+
+
 
 Post-Installation
 -----------------
