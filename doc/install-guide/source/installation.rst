@@ -111,7 +111,7 @@ To proceed deploying and configuring the components run the coreos-cloudinit com
 
 .. code-block:: bash
 
-    $ coreos-cloudinit --from-file cloud-config-ost.yaml
+    $ coreos-cloudinit --from-file cloud-config-ost-controller.yaml
     2016/08/22 23:22:52 Checking availability of "local-file"
     2016/08/22 23:22:52 Fetching user-data from datasource of type "local-file"
     2016/08/22 23:22:52 Fetching meta-data from datasource of type "local-file"
