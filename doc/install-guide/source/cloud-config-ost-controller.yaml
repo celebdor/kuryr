@@ -47,6 +47,11 @@ write-files:
     content: |
       #!/bin/bash
 
+      #ensure the hostname resolves to loopback interface
+      if [[ -z $(grep $HOSTNAME /etc/hosts) ]]; then
+          echo "127.0.0.1    $HOSTNAME" >> /etc/hosts
+      fi
+
       #ensure modprobe is accessible
       ln -s $(which modprobe) /opt/bin/modprobe
 
