@@ -9,6 +9,9 @@ can be physical or virtual: the OpenStack controler node (ost-controller),
 the Kubernetes cluster controller (k8s-controller) and one or more Kubernetes
 workers (k8s-worker1, k8s-worker2, ...).
 
+Even if you have an existing Openstack setup, it is advisable that you
+install the ost-controller to a have a clean start and ease the
+installation and test procedures.
 
 Please notice this guide will install a Kubernetes controller node.
 This is required even if you have a running cluster, due to the needed
@@ -16,8 +19,6 @@ integration of Kuryr with Kuberlets.
 
 To facilitate the installation process, we provide the scripts to configure
 the k8s nodes (controller and workers) using `coreos-cloudinit`_ utility.
-Refer to the `CoreOS Cloud Init Installation <cloudinit.html>`_ for  instructions on how to
-install it.
 
 These files can be used to configure nodes provisioned from cloud providers.
 The `Cloud Installation Guide <cloud-install.html>`_ explains how to adapt this
@@ -28,6 +29,11 @@ launching multiple worker nodes.
 
 Requirements
 ------------
+
+This installation guide assumes the following requirements for the installation
+environment:
+
+The nodes run the stable release of CoreOS (1068.10.0 or later).
 
 The actual physical resources required by each node depend on the workload
 you plan to execute. Following are some recomendations:
@@ -235,7 +241,7 @@ k8s-controller node itself:
    $ mkdir /etc/conf.d
    $ cat >> /etc/conf.d/k8s-controller <<EOF
      LOCAL_IP=10.142.0.3
-     OST_CONTROLLER_IP=10.142.0.2
+     OST_CONTROLLER=10.142.0.2
      EOF
 
 You can also modify any of the default parameters defined in the */etc/conf.d/k8s-controller-defaults*
@@ -390,6 +396,7 @@ The fitst step is to create an uplink at the ost-controller, using the script pr
 the installation. See `Edge Router Setup at the Midonet Quick Start Guide <https://docs.midonet.org/docs/latest-en/quick-start-guide/ubuntu-1404_liberty/content/edge_router_setup.html>`_ for more details.
 
 .. code-block:: bash
+
     $ sudo /opt/bin/create_uplink
     Created a new router:
     +-----------------------+--------------------------------------+
