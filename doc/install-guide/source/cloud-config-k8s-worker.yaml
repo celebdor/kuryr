@@ -16,7 +16,12 @@ write-files:
     content: |
       #!/bin/bash
 
-      #merge default config and (optional) provided pararmeters
+      #ensure the hostname resolves to loopback interface
+      if [[ -z $(grep $HOSTNAME /etc/hosts) ]]; then
+          echo "127.0.0.1    $HOSTNAME" >> /etc/hosts
+      fi
+
+     #merge default config and (optional) provided pararmeters
       CFG_FILE="k8s-worker"
       touch -a /etc/conf.d/$CFG_FILE
       cp /etc/conf.d/$CFG_FILE /tmp/$CFG_FILE
