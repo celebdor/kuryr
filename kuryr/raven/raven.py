@@ -28,7 +28,6 @@ import requests
 from kuryr._i18n import _LE
 from kuryr._i18n import _LI
 from kuryr.common import config
-from kuryr.common import constants
 from kuryr import controllers
 from kuryr.raven.aio import headers
 from kuryr.raven.aio import methods
@@ -162,34 +161,6 @@ class Raven(service.Service):
 
         return router
 
-    def _create_default_security_group(self):
-        sgs = controllers._get_security_groups_by_attrs(
-            unique=False,
-            name=constants.K8S_HARDCODED_SG_NAME)
-        if sgs:
-            sg = sgs[0]
-            LOG.debug('Reusing the existing SG %s', sg)
-        else:
-            sg_response = self.neutron.create_security_group(
-                {'security_group':
-                    {'name': constants.K8S_HARDCODED_SG_NAME}})
-            sg = sg_response['security_group']
-            # Create ingress rules similarly to Neutron Default SG
-            for ethertype in ['IPv4', 'IPv6']:
-                rule = {
-                    'security_group_id': sg['id'],
-                    'ethertype': ethertype,
-                    'direction': 'ingress',
-                    'remote_group_id': sg['id'],
-                }
-                req = {
-                    'security_group_rule': rule,
-                }
-                LOG.debug('Creating SG rule %s', req)
-                self.neutron.create_security_group_rule(req)
-            LOG.debug('Created a new default SG %s', sg)
-        self._default_sg = sg['id']
-
     def _construct_subnetpool(self, namespace_router):
         subnetpool_name = HARDCODED_NET_NAME + '-pool'
         subnetpool_prefix = config.CONF.k8s.cluster_subnet_pool
@@ -315,7 +286,6 @@ class Raven(service.Service):
                       'router.', service_subnet_id)
 
     def _ensure_networking_base(self):
-        self._create_default_security_group()
 
         self._construct_external_service_network()
         router = self._get_or_create_service_router()

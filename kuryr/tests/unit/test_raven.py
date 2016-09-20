@@ -23,7 +23,6 @@ import ddt
 from oslo_service import service
 
 from kuryr.common import config
-from kuryr.common import constants
 from kuryr.raven import raven
 from kuryr.tests.unit import base
 from kuryr import utils
@@ -203,28 +202,6 @@ class TestRaven(base.TestKuryrBase):
     def test__ensure_networking_base_not_set(self):
         """Check that it creates net/subnet when none are reported"""
         r = raven.Raven()
-
-        # Mock the security group call by returning an empty list
-        # and then preparing a new entity
-        self.mox.StubOutWithMock(raven.controllers,
-                                 '_get_security_groups_by_attrs')
-        self.mox.StubOutWithMock(r.neutron, 'create_security_group')
-        self.mox.StubOutWithMock(r.neutron, 'create_security_group_rule')
-        raven.controllers._get_security_groups_by_attrs(
-            unique=False, name=constants.K8S_HARDCODED_SG_NAME).AndReturn([])
-        sg_id = str(uuid.uuid4())
-        r.neutron.create_security_group(
-            {'security_group':
-                {'name': constants.K8S_HARDCODED_SG_NAME}}).AndReturn(
-                    {'security_group': {'id': sg_id}})
-        for ethertype in ['IPv4', 'IPv6']:
-            r.neutron.create_security_group_rule(
-                {'security_group_rule': {
-                    'security_group_id': sg_id,
-                    'direction': 'ingress',
-                    'remote_group_id': sg_id,
-                    'ethertype': ethertype}}) \
-                .AndReturn({})
 
         # Mock the router call by returning an empty list
         # and then preparing a new entity
@@ -449,15 +426,6 @@ class TestRaven(base.TestKuryrBase):
     def test__ensure_networking_base_noop(self):
         """Check that it creates net/subnet when nothing needs to be done"""
         r = raven.Raven()
-
-        # Mock the security group call by returning an existing sg
-        self.mox.StubOutWithMock(raven.controllers,
-                                 '_get_security_groups_by_attrs')
-        sg_id = str(uuid.uuid4())
-        raven.controllers._get_security_groups_by_attrs(
-            unique=False, name=constants.K8S_HARDCODED_SG_NAME).AndReturn([{
-                'id': sg_id,
-                'name': constants.K8S_HARDCODED_SG_NAME}])
 
         # Mock the service router call by returning an existing one
         self.mox.StubOutWithMock(raven.controllers, '_get_routers_by_attrs')

@@ -79,6 +79,23 @@ def _get_endpoint_members(subsets):
     return members
 
 
+@asyncio.coroutine
+def _delete_sg(delegator, client, sg):
+    """Delete a security group and all its associated rules
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param sg: security group
+    """
+    try:
+        yield from delegator(
+            client.delete_security_group, sg['id'])
+        LOG.debug("Successfully deleted the neutron SG. %s", sg)
+    except n_exceptions.NeutronClientException as ex:
+        with excutils.save_and_reraise_exception():
+            LOG.error(_LE("Error deleting Neutron SG: %si"), ex)
+
+
 def _get_pool_members(pool_members):
     """Returns a set of tuples (address, port) of the pool members.
 
@@ -95,9 +112,22 @@ def _get_pool_members(pool_members):
 
 @asyncio.coroutine
 def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
-                        annotations, security_group_id):
+                        vip_sg, annotations):
+    """Creates a floating ip
 
-    # TODO(devvesa): only one ip is considered now
+    Creates a FIP with the given ip address and associates it to the given VIP.
+    Modifies VIP's SG rules to allow traffic from FIP
+
+    :param delegator: object to delegate requests
+    :param client: neutron client instance
+    :param ext_net_id: id of external network
+    :param vip: vip associated with the fip
+    :param extenal_ips: list of external ips for the vip
+    :param annotations: service annotations
+    :param vip_sg: id of default security group for namespace
+    TODO: (pablochacin): consider not passing the annotations and returning
+    the objects created (fip, sg)
+    """
     external_ip = external_ips[0]
     if len(external_ips) > 1:
         LOG.info(_LI('Found more than one external IPs. '
@@ -160,12 +190,14 @@ def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
     protocol_port = vip['protocol_port']
     protocol = vip['protocol']
 
+    #FIXME: this rule allows unrestricted access to vip.
+    #       it should be only for traffic comming from fip
     try:
-        yield from delegator(
+        fip_sg_rule = yield from delegator(
             client.create_security_group_rule,
             {
                 'security_group_rule': {
-                    'security_group_id': security_group_id,
+                    'security_group_id': vip_sg['id'],
                     'direction': 'ingress',
                     'protocol': protocol,
                     'port_range_min': protocol_port,
@@ -173,6 +205,9 @@ def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
                 }
             }
         )
+        annotations.update(
+            {constants.K8S_ANNOTATION_FIP_SG_RULE_KEY:
+                jsonutils.dumps(fip_sg_rule)})
         LOG.info(_LI('SG rule for external access at VIP "%(vip)s"'),
                  {'vip': vip['address']})
     except n_exceptions.Conflict:
@@ -180,39 +215,39 @@ def _create_floating_ip(delegator, client, ext_net_id, vip, external_ips,
         pass
 
     annotations.update(
-        {constants.K8S_ANNOTATION_FIP_KEY:
-            jsonutils.dumps(fip)})
+        {constants.K8S_ANNOTATION_FIP_KEY: jsonutils.dumps(fip)})
 
 
 @asyncio.coroutine
-def _delete_floating_ip(delegator, client, a_fip, a_vip,
-                        security_group_id, annotations=None):
+def _delete_floating_ip(delegator, client, fip, vip,
+                        vip_sg, annotations=None):
+    """Delete floating IP and associated sg rule
 
+    :param delegator: object to delegate requests to
+    :param cliente: neutron client instance
+    :param fip: fip to be removed
+    :param vip: vip associated to fip
+    :param vip_sg: vip's secutity group
+    :param annotations: service annotations
+    """
     yield from delegator(
         client.delete_floatingip,
-        a_fip['id'])
+        fip['id'])
 
     # Delete the associated SG rule
-    protocol_port = a_vip['protocol_port']
-    protocol = a_vip['protocol']
-    sgrs = yield from delegator(
-        client.list_security_group_rules,
-        security_group_id=security_group_id,
-        protocol=protocol,
-        port_range_min=protocol_port,
-        port_range_max=protocol_port,
-        direction='ingress')
-    if sgrs:
-        sgr = sgrs['security_group_rules'][0]
-        yield from delegator(
-            client.delete_security_group_rule,
-            sgr['id'])
-        LOG.info(_LI('SG rule for external access at VIP "%(vip)s"'
-                     ' deleted'),
-                 {'vip': a_vip['address']})
+    fip_sg_rule = jsonutils.loads(
+        annotations[constants.K8S_ANNOTATION_FIP_SG_RULE_KEY], None)
+    if fip_sg_rule:
+        try:
+            yield from delegator(
+                client.delete_security_group_rule, fip_sg_rule)
+        except n_exceptions.NotFound as ex:
+            LOG.error(_LE("SG Rule for FIP not found: %s"), ex)
+    else:
+        LOG.error(_LE("No SG Rule for FIP defined"))
 
-    if annotations:
-        annotations[constants.K8S_ANNOTATION_FIP_KEY] = None
+    annotations[constants.K8S_ANNOTATION_FIP_KEY] = None
+    annotations[constants.K8S_ANNOTATION_FIP_SG_RULE_KEY] = None
 
 
 @asyncio.coroutine
@@ -241,6 +276,87 @@ def _add_pool_member(delegator, client, pool_id, address, protocol_port):
 
 
 @asyncio.coroutine
+def _get_network(delegator, client, namespace):
+    """Returns the network for a namespace
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param namespace: name of the namespace
+    """
+    network_name = utils.get_network_name(namespace)
+    networks_response = yield from delegator(
+        client.list_networks,
+        name=network_name)
+    networks = networks_response['networks']
+    if networks:
+        return networks[0]
+    else:
+        return None
+
+
+@asyncio.coroutine
+def _get_subnet(delegator, client, namespace):
+    """Returns the subnet for a namespace
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param namespace: name of the namespace
+    """
+    subnet_name = utils.get_subnet_name(namespace)
+    subnets_response = yield from delegator(
+        client.list_subnets, name=subnet_name)
+    subnets = subnets_response['subnets']
+    if subnets:
+        return subnets[0]
+    else:
+        return None
+
+
+@asyncio.coroutine
+def _get_sg(delegator, client, sg_name):
+    """Returns a security group given its name
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param sg_name: name of the sg
+    """
+    sg_response = yield from delegator(
+        client.list_security_groups, name=sg_name)
+    sgs = sg_response['security_groups']
+    if sgs:
+        return sgs[0]
+    else:
+        return None
+
+
+@asyncio.coroutine
+def _get_ns_sg(delegator, client, namespace):
+    """Returns a security group for a namespace
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param namespace: name of the namespace
+    """
+    ns_sg_name = utils.get_ns_sg_name(namespace)
+    return (yield from _get_sg(
+        delegator, client, ns_sg_name))
+
+
+@asyncio.coroutine
+def _get_vip_sg(delegator, client, namespace, service):
+    """Returns a security group for a service's vip
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param namespace: name of the namespace
+    :param service: name of the service
+    """
+    vip_sg_name = utils.get_vip_sg_mame(namespace, service)
+    return (yield from _get_sg(
+        delegator, client, vip_sg_name))
+
+
+@asyncio.coroutine
 def _del_pool_member(delegator, client, member_id):
     """Creates an LBaaS member
 
@@ -252,6 +368,44 @@ def _del_pool_member(delegator, client, member_id):
         client.delete_member,
         str(member_id))
     LOG.debug('Successfully deleted LBaaS pool member %s.', member_id)
+
+
+@asyncio.coroutine
+def _add_default_sg_rules(delegator, client, sg):
+    """Creates default security rules for a security group
+
+    :param delegator: Object to delegate the creation of the member
+    :param client: neutron client instance
+    :param sg: security group
+    """
+    sg_rule_list = []
+    for ethertype in ['IPv4', 'IPv6']:
+        sg_rule_response = yield from delegator(
+            client.create_security_group_rule,
+            {'security_group_rule': {
+                'security_group_id': sg['id'],
+                'ethertype': ethertype,
+                'direction': 'ingress'}
+             })
+        sg_rule = sg_rule_response['security_group_rule']
+        if sg_rule:
+            LOG.debug('SG Rule create %s', sg_rule)
+            sg_rule_list.append(sg_rule)
+    return sg_rule_list
+
+
+@asyncio.coroutine
+def _get_ports(delegator, client, network):
+    """Returns the ports for a network
+
+    :param delegator: object to delegate requests
+    :param client: instance of neutron client
+    :param network: id of network
+    """
+    neutron_ports_response = yield from delegator(
+        client.list_ports, network_id=network)
+    neutron_ports = neutron_ports_response['ports']
+    return neutron_ports
 
 
 @six.add_metaclass(abc.ABCMeta)
@@ -409,21 +563,6 @@ class K8sPodsWatcher(K8sAPIWatcher):
 
         :param decoded_json: A pod event to be translated.
         """
-        @asyncio.coroutine
-        def get_networks(network_name):
-            networks_response = yield from self.delegate(
-                self.neutron.list_networks,
-                name=network_name)
-            networks = networks_response['networks']
-            return networks
-
-        @asyncio.coroutine
-        def get_subnets(subnet_name):
-            subnets_response = yield from self.delegate(
-                self.neutron.list_subnets, name=subnet_name)
-            subnets = subnets_response['subnets']
-            return subnets
-
         LOG.debug("Pod notification %s", decoded_json)
         event_type = decoded_json.get('type', '')
         content = decoded_json.get('object', {})
@@ -431,62 +570,67 @@ class K8sPodsWatcher(K8sAPIWatcher):
         annotations = metadata.get('annotations', {})
         labels = metadata.get('labels', {})
         namespace = metadata.get('namespace')
+
         if event_type == ADDED_EVENT:
+            #FIXME: This syncronization looks as unnecessary and probably
+            #       broken. Also, looks for info from namespace annotations
+            #       instead of neutron
             with (yield from self.namespace_added):
-                namespace_network_name = namespace
-                namespace_subnet_name = utils.get_subnet_name(namespace)
-
-                namespace_networks = yield from get_networks(
-                    namespace_network_name)
-                namespace_subnets = yield from get_subnets(
-                    namespace_subnet_name)
+                namespace_network = yield from _get_network(
+                    self.delegate, self.neutron, namespace)
+                namespace_subnet = yield from _get_subnet(
+                    self.delegate, self.neutron, namespace)
+                namespace_sg = yield from _get_ns_sg(
+                    self.delegate, self.neutron, namespace)
                 # Wait until the namespace translation is done.
-                while not (namespace_networks and namespace_subnets):
-                    yield from self.namespace_added.wait()
-                    namespace_networks = yield from get_networks(
-                        namespace_network_name)
-                    namespace_subnets = yield from get_subnets(
-                        namespace_subnet_name)
-                namespace_network = namespace_networks[0]
-                namespace_subnet = namespace_subnets[0]
+                while not (namespace_network and namespace_subnet and
+                    namespace_sg):
+                        yield from self.namespace_added.wait()
+                        namespace_network = yield from _get_network(
+                            self.delegate, self.neutron, namespace)
+                        namespace_subnet = yield from _get_subnet(
+                             self.delegate, self.neutron, namespace)
+                        namespace_sg = yield from _get_ns_sg(
+                             self.delegate, self.neutron, namespace)
 
-                if constants.K8S_ANNOTATION_PORT_KEY in annotations:
-                    LOG.debug('Ignore an ADDED event as the pod already has a '
-                              'neutron port')
-                    return
-                sg = labels.get(constants.K8S_LABEL_SECURITY_GROUP_KEY,
-                                self._default_sg)
-                new_port = {
-                    'name': metadata.get('name', ''),
-                    'network_id': namespace_network['id'],
-                    'admin_state_up': True,
-                    'device_owner': constants.DEVICE_OWNER,
-                    'fixed_ips': [{'subnet_id': namespace_subnet['id']}],
-                    'security_groups': [sg]
-                }
-                try:
-                    created_port = yield from self.delegate(
-                        self.neutron.create_port, {'port': new_port})
-                    port = created_port['port']
-                    LOG.debug("Successfully create a port %s.", port)
-                except n_exceptions.NeutronClientException as ex:
-                    with excutils.save_and_reraise_exception():
-                        # REVISIT(yamamoto): We ought to report to a user.
-                        # eg. marking the pod error.
-                        LOG.error(_LE("Error happened during creating a"
-                                      " Neutron port: %s"), ex)
+            if constants.K8S_ANNOTATION_PORT_KEY in annotations:
+                LOG.debug('Ignore an ADDED event as the pod already has a '
+                          'neutron port')
+                return
 
-                path = metadata.get('selfLink', '')
-                annotations.update(
-                    {constants.K8S_ANNOTATION_PORT_KEY: jsonutils.dumps(port)})
-                annotations.update(
-                    {constants.K8S_ANNOTATION_SUBNET_KEY: jsonutils.dumps(
-                        namespace_subnet)})
-                if path:
-                    yield from _update_annotation(self.delegate, path, 'Pod',
-                                                  annotations)
+            sg = labels.get(constants.K8S_LABEL_SECURITY_GROUP_KEY,
+                            namespace_sg['id'])
+            new_port = {
+                'name': metadata.get('name', ''),
+                'network_id': namespace_network['id'],
+                'admin_state_up': True,
+                'device_owner': constants.DEVICE_OWNER,
+                'fixed_ips': [{'subnet_id': namespace_subnet['id']}],
+                'security_groups': [sg]
+            }
+            try:
+                created_port = yield from self.delegate(
+                    self.neutron.create_port, {'port': new_port})
+                port = created_port['port']
+                LOG.debug("Successfully create a port %s.", port)
+            except n_exceptions.NeutronClientException as ex:
+                with excutils.save_and_reraise_exception():
+                    # REVISIT(yamamoto): We ought to report to a user.
+                    # eg. marking the pod error.
+                    LOG.error(_LE("Error happened during creating a"
+                                  " Neutron port: %s"), ex)
+
+            path = metadata.get('selfLink', '')
+            annotations.update(
+                {constants.K8S_ANNOTATION_PORT_KEY: jsonutils.dumps(port)})
+            annotations.update(
+                {constants.K8S_ANNOTATION_SUBNET_KEY: jsonutils.dumps(
+                    namespace_subnet)})
+            yield from _update_annotation(self.delegate, path, 'Pod',
+                                          annotations)
 
         elif event_type == DELETED_EVENT:
+            #(pchacin) waiting for namespace deleted seams unnecessary
             with (yield from self.namespace_deleted):
                 neutron_port = jsonutils.loads(
                     annotations.get(constants.K8S_ANNOTATION_PORT_KEY, '{}'))
@@ -512,8 +656,10 @@ class K8sPodsWatcher(K8sAPIWatcher):
         elif event_type == MODIFIED_EVENT:
             old_port = annotations.get(constants.K8S_ANNOTATION_PORT_KEY)
             if old_port:
+                default_sg = yield from _get_ns_sg(
+                    self.delegate, self.neutron, namespace)
                 sg = labels.get(constants.K8S_LABEL_SECURITY_GROUP_KEY,
-                                self._default_sg)
+                                default_sg['id'])
                 port_id = jsonutils.loads(old_port)['id']
                 update_req = {
                     'security_groups': [sg],
@@ -574,7 +720,10 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
 
     @asyncio.coroutine
     def translate(self, decoded_json):
-        """Translates a K8s namespace into two Neutron networks and subnets.
+        """Translates a K8s namespace into two.
+
+        Translates a K8s namespace into two Neutron networks and subnets, and a
+        default security group to be used by pods.
 
         The two pairs of the network and the subnet are created for the cluster
         network. Each subnet is associated with its dedicated network. They're
@@ -583,12 +732,6 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
 
         :param decoded_json: A namespace event to be translated.
         """
-        @asyncio.coroutine
-        def get_ports(network_id):
-            neutron_ports_response = yield from self.delegate(
-                self.neutron.list_ports, network_id=neutron_network_id)
-            neutron_ports = neutron_ports_response['ports']
-            return neutron_ports
 
         LOG.debug("Namespace notification %s", decoded_json)
         event_type = decoded_json.get('type', '')
@@ -597,18 +740,18 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
         annotations = metadata.get('annotations', {})
         if event_type == ADDED_EVENT:
             with (yield from self.namespace_added):
-                namespace_network_name = metadata['name']
+                namespace_name = metadata['name']
+                namespace_network_name = utils.get_network_name(
+                     namespace_name)
                 namespace_subnet_name = utils.get_subnet_name(
-                    namespace_network_name)
-                namespace_networks_response = yield from self.delegate(
-                    self.neutron.list_networks,
-                    name=namespace_network_name)
-                namespace_networks = namespace_networks_response['networks']
+                    namespace_name)
+                namespace_sg_name = utils.get_ns_sg_name(
+                    namespace_name)
 
                 # Ensure the network exists
-                if namespace_networks:
-                    namespace_network = namespace_networks[0]
-                else:
+                namespace_network = yield from _get_network(
+                    self.delegate, self.neutron, namespace_name)
+                if not namespace_network:
                     # NOTE(devvesa): To avoid name collision, we should add the
                     #                uid of the namespace in the neutron tags
                     #                info
@@ -622,14 +765,9 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                             namespace_network)})
 
                 # Ensure the subnet exists
-                namespace_subnets_response = yield from self.delegate(
-                    self.neutron.list_subnets,
-                    name=namespace_subnet_name)
-                namespace_subnets = namespace_subnets_response['subnets']
-                if namespace_subnets and (
-                        constants.K8S_ANNOTATION_SUBNET_KEY in annotations):
-                    namespace_subnet = namespace_subnets[0]
-                else:
+                namespace_subnet = yield from _get_subnet(
+                    self.delegate, self.neutron, namespace_name)
+                if not namespace_subnet:
                     new_subnet = {
                         'name': namespace_subnet_name,
                         'network_id': namespace_network['id'],
@@ -640,10 +778,9 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                         self.neutron.create_subnet, {'subnet': new_subnet})
                     namespace_subnet = subnet_response['subnet']
                     LOG.debug('Created a new subnet %s', namespace_subnet)
-
-                annotations.update(
-                    {constants.K8S_ANNOTATION_SUBNET_KEY: jsonutils.dumps(
-                        namespace_subnet)})
+                    annotations.update(
+                        {constants.K8S_ANNOTATION_SUBNET_KEY: jsonutils.dumps(
+                            namespace_subnet)})
 
                 neutron_network_id = namespace_network['id']
                 # Router is created in the subnet pool at raven start time.
@@ -667,17 +804,27 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                     LOG.debug('The subnet %s is already bound to the router',
                               neutron_subnet_id)
 
+                #ensure security group exists
+                namespace_sg = yield from _get_ns_sg(
+                    self.delegate, self.neutron, namespace_name)
+                if not namespace_sg:
+                    sg_response = yield from self.delegate(
+                        self.neutron.create_security_group,
+                        {'security_group':
+                            {'name': namespace_sg_name}})
+                    namespace_sg = sg_response['security_group']
+                    sg_rules = yield from _add_default_sg_rules(
+                        self.delegate, self.neutron, namespace_sg)
+                    LOG.debug('Created a new security group %s', namespace_sg)
+                    LOG.debug('SG Rules: %s', sg_rules)
+
+                annotations.update(
+                    {constants.K8S_ANNOTATION_SG_KEY: jsonutils.dumps(
+                        namespace_sg)})
+
                 path = metadata.get('selfLink', '')
-                metadata.update({'annotations': annotations})
-                content.update({'metadata': metadata})
-                headers = {
-                    'Content-Type': 'application/merge-patch+json',
-                    'Accept': 'application/json',
-                }
-                response = yield from self.delegate(
-                    requests.patch, constants.K8S_API_ENDPOINT_BASE + path,
-                    data=jsonutils.dumps(content), headers=headers)
-                assert response.status_code == requests.codes.ok
+                yield from _update_annotation(self.delegate, path, 'Namespace',
+                                              annotations)
 
                 # Notify the namespace translation is done.
                 self.namespace_added.notify_all()
@@ -687,6 +834,8 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                 annotations.get(constants.K8S_ANNOTATION_NETWORK_KEY, '{}'))
             namespace_subnet = jsonutils.loads(
                 annotations.get(constants.K8S_ANNOTATION_SUBNET_KEY, '{}'))
+            namespace_sg = jsonutils.loads(
+                annotations.get(constants.K8S_ANNOTATION_SG_KEY, '{}'))
 
             neutron_network_id = namespace_network.get('id', None)
             neutron_router_id = self._router.get('id', None)
@@ -704,10 +853,12 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                                       "router port: %s"), ex)
 
                 # Wait until all the ports are deleted.
-                ports = yield from get_ports(neutron_network_id)
+                ports = yield from _get_ports(
+                    self.delegate, self.neutron, neutron_network_id)
                 while ports:
                     yield from self.namespace_deleted.wait()
-                    ports = yield from get_ports(neutron_network_id)
+                    ports = yield from _get_ports(
+                         self.delegate, self.neutron, neutron_network_id)
 
                 try:
                     yield from self.delegate(
@@ -719,6 +870,18 @@ class K8sNamespaceWatcher(K8sAPIWatcher):
                 LOG.debug("Successfully deleted the neutron network.")
             else:
                 LOG.debug('Deletion event without neutron network information.'
+                          'Ignoring it...')
+
+            if namespace_sg:
+                try:
+                    yield from _delete_sg(
+                        self.delegate, self.neutron, namespace_sg)
+                except n_exceptions.NeutronClientException as ex:
+                    with excutils.save_and_reraise_exception():
+                        LOG.error(_LE("Error happend during deleting a"
+                                      " Neutron SG: %s"), ex)
+            else:
+                LOG.debug('Deletion event without neutron sg information.'
                           'Ignoring it...')
 
         LOG.debug('Successfully translated the namespace')
@@ -792,11 +955,6 @@ class K8sServicesWatcher(K8sAPIWatcher):
 
         :param decoded_json: A service event to be translated.
         """
-        def get_subnets(subnet_name):
-            cluster_subnet_response = yield from self.delegate(
-                self.neutron.list_subnets, name=cluster_subnet_name)
-            cluster_subnets = cluster_subnet_response['subnets']
-            return cluster_subnets
 
         LOG.debug("Service notification %s", decoded_json)
         event_type = decoded_json.get('type', '')
@@ -805,6 +963,8 @@ class K8sServicesWatcher(K8sAPIWatcher):
         annotations = metadata.get('annotations', {})
         service_name = metadata.get('name', '')
         service_spec = content.get('spec', {})
+        namespace_name = metadata.get('namespace')
+
         if service_name == 'kubernetes':
             LOG.info(_LI('Ignore "kubernetes" infra service'))
             return
@@ -816,16 +976,13 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     LOG.debug('Ignore an ADDED event as the pool already has '
                               'a neutron port')
                     return
-                namespace = metadata.get(
-                    'namespace', constants.K8S_DEFAULT_NAMESPACE)
-                cluster_subnet_name = utils.get_subnet_name(namespace)
-                cluster_subnets = yield from get_subnets(cluster_subnet_name)
+                cluster_subnet = yield from _get_subnet(
+                    self.delegate, self.neutron, namespace_name)
                 # Wait until the namespace translation is done.
-                while not cluster_subnets:
+                while not cluster_subnet:
                     self.namespace_added.wait()
-                    cluster_subnets = yield from get_subnets(
-                        cluster_subnet_name)
-                cluster_subnet = cluster_subnets[0]
+                    cluster_subnet = yield from _get_subnet(
+                        self.delegate, self.neutron, namespace_name)
 
             # Service translation starts here.
             with (yield from self.service_added):
@@ -858,6 +1015,7 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     with excutils.save_and_reraise_exception():
                         LOG.error(_LE("Error happened during creating a"
                                       " Neutron pool: %s"), ex)
+                    raise
 
                 path = metadata.get('selfLink', '')
                 annotations.update(
@@ -877,49 +1035,59 @@ class K8sServicesWatcher(K8sAPIWatcher):
                         'protocol_port': protocol_port,
                     },
                 }
+
                 try:
+                    #create a sg for the vip
+                    vip_sg_name = utils.get_vip_sg_name(
+                        namespace_name, service_name)
+                    sg_response = yield from self.delegate(
+                        self.neutron.create_security_group,
+                        {'security_group':
+                            {'name': vip_sg_name}})
+                    vip_sg = sg_response['security_group']
+                    vip_sg_rules = yield from _add_default_sg_rules(
+                        self.delegate, self.neutron, vip_sg)
+                    LOG.debug('Created a new security group %s', vip_sg)
+                    LOG.debug('SG Rules: %s', vip_sg_rules)
+
                     created_vip = yield from self.delegate(
                         self.neutron.create_vip, vip_request)
                     vip = created_vip['vip']
                     yield from self.delegate(
                         self.neutron.update_port, vip['port_id'],
-                        {'port': {'security_groups': [self._default_sg]}})
-                    # update the vip to the default security group
-                    LOG.debug('Succeeded to created a VIP %s', vip)
+                        {'port': {'security_groups': [vip_sg['id']]}})
+
+                    annotations.update(
+                        {constants.K8S_ANNOTATION_VIP_KEY:
+                            jsonutils.dumps(vip)})
+                    annotations.update(
+                        {constants.K8S_ANNOTATION_VIP_SG_KEY:
+                            jsonutils.dumps(vip_sg)})
+                    LOG.debug('Succeeded to created a VIP  %s', vip)
                 except n_exceptions.NeutronClientException as ex:
                     LOG.error(_LE("Error happened during creating a"
                                   " Neutron VIP: %s"), ex)
                     try:
                         yield from self.delegate(
                             self.neutron.delete_pool, pool_id)
+                        if vip_sg:
+                            yield from self.delegate(
+                                self.neutron.delete_security_group, vip_sg)
                     except n_exceptions.NeutronClientException as ex:
                         LOG.error(
                             _LE('Error happened during cleaning up a '
                                 'Neutron pool: %s on creating the VIP.'), ex)
                         raise
-                    raise
-                annotations.update(
-                    {constants.K8S_ANNOTATION_VIP_KEY: jsonutils.dumps(vip)})
-
-                # add security group rule in the default security group to
-                # allow access from the VIP to all containers
-                if not self._default_sg:
-                    raise Exception('Security group should be already created'
-                                    ' at this point')
 
                 if 'externalIPs' in service_spec:
-
-                    # TODO(devvesa): better security group management is
-                    # mandatory for future releases. The self._default_sg
-                    # field is a poor solution
                     yield from _create_floating_ip(
                         self.sequential_delegate,
                         self.neutron,
                         self._external_service_network['id'],
                         vip,
                         service_spec['externalIPs'],
-                        annotations,
-                        self._default_sg)
+                        vip_sg,
+                        annotations)
 
                 if path:
                     yield from _update_annotation(
@@ -938,12 +1106,14 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 # Existing external ip deleted
                 annotated_fip = annotations[constants.K8S_ANNOTATION_FIP_KEY]
                 annotated_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
+                annotated_vip_sg = annotations[
+                    constants.K8S_ANNOTATION_VIP_SG_KEY]
                 yield from _delete_floating_ip(
                     self.sequential_delegate,
                     self.neutron,
                     jsonutils.loads(annotated_fip),
                     jsonutils.loads(annotated_vip),
-                    self._default_sg,
+                    annotated_vip_sg,
                     annotations)
 
                 yield from _update_annotation(
@@ -958,18 +1128,17 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 # not have an external ip
 
                 annotated_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
+                annotated_vip_sg = annotations[
+                    constants.K8S_ANNOTATION_VIP_SG_KEY]
 
-                # TODO(devvesa): better security group management is
-                # mandatory for future releases. The self._default_sg
-                # field is a poor solution
                 yield from _create_floating_ip(
                     self.sequential_delegate,
                     self.neutron,
                     self._external_service_network['id'],
                     jsonutils.loads(annotated_vip),
                     service_spec['externalIPs'],
-                    annotations,
-                    self._default_sg)
+                    annotated_vip_sg,
+                    annotations)
 
                 yield from _update_annotation(
                     self.delegate,
@@ -983,6 +1152,8 @@ class K8sServicesWatcher(K8sAPIWatcher):
                 # Cover the case where the user changes the external ip
                 annotated_fip = annotations[constants.K8S_ANNOTATION_FIP_KEY]
                 annotated_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
+                annotated_vip_sg = annotations[
+                    constants.K8S_ANNOTATION_VIP_SG_KEY]
 
                 old_fip = jsonutils.loads(
                     annotated_fip)['floating_ip_address']
@@ -1001,12 +1172,9 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     self.neutron,
                     jsonutils.loads(annotated_fip),
                     jsonutils.loads(annotated_vip),
-                    self._default_sg,
+                    annotated_vip_sg,
                     annotations)
 
-                # TODO(devvesa): better security group management is
-                # mandatory for future releases. The self._default_sg
-                # field is a poor solution
                 # Create the new one
                 yield from _create_floating_ip(
                     self.sequential_delegate,
@@ -1014,8 +1182,8 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     self._external_service_network['id'],
                     jsonutils.loads(annotated_vip),
                     service_spec['externalIPs'],
-                    annotations,
-                    self._default_sg)
+                    annotated_vip_sg,
+                    annotations)
 
                 # Update the annotation
                 yield from _update_annotation(
@@ -1073,20 +1241,35 @@ class K8sServicesWatcher(K8sAPIWatcher):
                     with excutils.save_and_reraise_exception():
                         LOG.error(_LE("Error happened during deleting a"
                                       " Neutron pool: %s"), ex)
+                #delete the security group
+                vip_sg = jsonutils.loads(
+                    annotations[constants.K8S_ANNOTATION_VIP_SG_KEY])
+                if vip_sg:
+                    try:
+                        yield from _delete_sg(
+                            self.delegate, self.neutron, vip_sg)
+                    except n_exceptions.NeutronClientException as ex:
+                        with excutils.save_and_reraise_exception():
+                            LOG.error(_LE("Error happend during deleting a"
+                                      " Neutron SG: %s"), ex)
+                else:
+                    LOG.debug('Deleting vip  without sg information.')
 
+                # delete fip
                 if constants.K8S_ANNOTATION_FIP_KEY in annotations:
 
-                    a_fip = annotations[constants.K8S_ANNOTATION_FIP_KEY]
-                    a_vip = annotations[constants.K8S_ANNOTATION_VIP_KEY]
-                    yield from _delete_floating_ip(
-                        self.sequential_delegate,
-                        self.neutron,
-                        jsonutils.loads(a_fip),
-                        jsonutils.loads(a_vip),
-                        self._default_sg)
+                    fip = jsonutils.load(
+                        annotations[constants.K8S_ANNOTATION_FIP_KEY])
+                    yield from self.delegate(
+                        self.neutron.delete_floatingip, fip['id'])
 
-                LOG.debug('Successfully deleted the Neutron pool %s',
-                          neutron_pool)
+                    LOG.debug('Successfully deleted the Neutron pool %s',
+                              neutron_pool)
+
+                else:
+                    LOG.debug('Deleting service without fip.'
+                              ' Ignoring it.')
+
                 self.service_deleted.notify()
 
 
