@@ -366,7 +366,7 @@ and allow communication between workers and the open stack controller node:
 
 .. code-block:: bash
 
-    $ /opt/bin/midonet-setup.sh
+    $ /opt/bin/midonet-setup
 
 The previous steps can be repeated for each worker. The rest of this document assumes you
 have at least two workers.
