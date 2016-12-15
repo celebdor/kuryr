@@ -58,6 +58,16 @@ write-files:
           sleep 1 && echo .;
         done;
       exit $?
+  - path: /etc/profile.d/kuryr-profile.sh
+    #adds /opt/bin to path
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+
+      if [[ -z $(echo $PATH | grep "/opt/bin") ]]; then
+         export PATH="/opt/bin:$PATH"
+      fi
+
   - path: /opt/bin/kubectl
     # Wrapper around Kubernetes' kubectl command line tool. It will download
     # the tool and set the right configuration for the caller to target the

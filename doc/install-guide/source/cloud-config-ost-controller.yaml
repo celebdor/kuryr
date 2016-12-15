@@ -33,6 +33,16 @@ write-files:
       ZK_ID=1
       C_SERVERS="127.0.0.1"
       C_FACTOR=1
+  - path: /etc/profile.d/kuryr-profile.sh
+    #adds /opt/bin to path
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+
+      if [[ -z $(echo $PATH | grep "/opt/bin") ]]; then
+         export PATH="/opt/bin:$PATH"
+      fi
+
   - path: /opt/bin/neutron
     # runs neutron client in neutron containr
     permissions: '0755'
@@ -244,6 +254,8 @@ write-files:
 
       source /etc/conf.d/ost-controller
 
+      MN_TUNNEL_ZONE_ID=$(/opt/bin/midonet-cli -e tunnel-zone list | grep " $MN_TUNNEL_ZONE " | cut -d ' ' -f 2)
+
       #if needed, create tunnel zone
       if [[ -z $MN_TUNNEL_ZONE_ID ]];then
          MN_TUNNEL_ZONE_ID=$(/opt/bin/midonet-cli -e tunnel-zone create name $MN_TUNNEL_ZONE type vxlan)
@@ -251,7 +263,9 @@ write-files:
       fi
 
       #add node to tunnel zone using local address
-      /opt/bin/midonet-cli -e tunnel-zone $MN_TUNNEL_ZONE_ID add member host $UUID address $LOCAL_IP
+      if [[ -z $(/opt/bin/midonet-cli -e tunnel-zone name $MN_TUNNEL_ZONE member list | grep $UUID) ]];then
+         /opt/bin/midonet-cli -e tunnel-zone $MN_TUNNEL_ZONE_ID add member host $UUID address $LOCAL_IP
+      fi
 coreos:
   fleet:
     # In case the user wants to fleet schedule things

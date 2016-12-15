@@ -81,7 +81,7 @@ write-files:
       # midonet setup
 
       source /etc/conf.d/k8s-worker
-      TUNNEL_ZONE_ID=$(midonet-cli -e tunnel-zone list| grep $TUNNEL_ZONE | cut -d ' ' -f 2)
+      TUNNEL_ZONE_ID=$(midonet-cli -e tunnel-zone list| grep " $TUNNEL_ZONE " | cut -d ' ' -f 2)
 
       /opt/bin/midonet-cli -e tunnel-zone $TUNNEL_ZONE_ID add member host $UUID address $LOCAL_IP
 coreos:
@@ -146,6 +146,7 @@ coreos:
         ExecStart=/usr/bin/docker run --name %n \
           -e MASTER_IP=${K8S_CONTROLLER} \
           -e ZK_ENDPOINTS=${OST_CONTROLLER}:2181 \
+          -e PUBLIC_IP=${LOCAL_IP} \
           -e UUID="${UUID}" \
           --volume=/:/rootfs:ro \
           --volume=/sys:/sys:ro \
